@@ -19,7 +19,7 @@ graph TD
     Worker <-->|Write Records| DB
     Worker -->|Read/Write Files| Storage[Local Disk Storage <br/> ./uploads /photos_data]
 
-    subgraph Offline Ingestion Pipeline
+    subgraph Ingestion["Offline Ingestion Pipeline"]
         CLIP[CLIP ViT-B-32 <br/> 512-dim Semantic Image Space]
         MTCNN[MTCNN Face Detector] --> FaceNet[FaceNet <br/> 512-dim Face Vector Space]
         DBSCAN[DBSCAN Clustering <br/> Face Grouping]
@@ -27,7 +27,7 @@ graph TD
         PHASH[pHash DCT <br/> 64-bit Int Hamming Distance]
     end
 
-    Worker -.-> Offline Ingestion Pipeline
+    Worker -.-> Ingestion
 ```
 
 ---
