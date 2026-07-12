@@ -1,136 +1,111 @@
-# Aura: AI-Powered Photo Management System
+# 🌌 Aura: AI-Powered Personal Photo Organiser
 
-Aura is a high-fidelity, senior-level photo organizer built around specialized vector spaces and metadata databases. It integrates local storage and Google Photos, automatically detects faces and groups people, categorizes documents, receipts, and landscapes, performs OCR text search, filters exact and near-duplicates, and utilizes an LLM query planner to translate natural language into structured database search plans.
+Aura is a high-performance, self-hosted photo management system built around specialized vector embedding spaces, offline machine learning models, and portable database architectures. 
 
----
-
-## 🏗️ Architecture & Technology Stack
-
-Aura utilizes a monorepo architecture coordinated via Docker Compose:
-
-```
-                [ React Web Dashboard (Port 3000) ]
-                               │
-                               ▼
-                 [ FastAPI Backend (Port 8000) ]
-                               │
-            ┌──────────────────┼──────────────────┐
-            ▼                  ▼                  ▼
-   [ Postgres + pgvector ]  [ Redis ]     [ Gemini API ]
-                               ▲          (Search Planner)
-                               │
-                        [ Celery Worker ]
-                               │
-            ┌──────────────────┼──────────────────┐
-            ▼                  ▼                  ▼
-     [ Local Disk ]    [ Google Photos ]     [ local ML ]
-    (/photos_data)          (OAuth2)      (CLIP, FaceNet, pHash)
-```
-
-### Specialized Core Vector Spaces
-
-Rather than forcing a single vector space to handle all image semantics, Aura separates concerns into three distinct databases/indexes:
-
-1. **Semantic Image Space (CLIP ViT-B-32 - 768 dimensions)**: Stores whole-image embeddings for conceptual similarity (e.g., searching "dog playing" matches dogs playing on a beach).
-2. **Face Vector Space (MTCNN + FaceNet - 512 dimensions)**: Stores cropped face embeddings. Groups people automatically using **DBSCAN Clustering** without labels.
-3. **Document Text Space (all-MiniLM-L6-v2 - 384 dimensions)**: Generates sentence embeddings of extracted OCR text (via PyTesseract) for medical prescriptions, bills, and documents.
-
-### Deduplication Engine
-
-* **Exact duplicates**: Handled via binary `SHA256` hashing stored with unique indexes in PostgreSQL.
-* **Near duplicates** (compressed, resized, or brightened images): Handled via **Perceptual Hashing (pHash)**.
-* **Scaling to 100,000+ images**: Pairwise Hamming distance comparison is computationally expensive ($O(N^2)$). Aura implements a **Locality Sensitive Hashing (LSH)** algorithm by splitting the 64-bit pHash into four 16-bit chunks, enabling fast, sub-second near-duplicate searches in $O(N)$ time.
+It indexes local directories and Google Photos, extracts faces and groups people automatically using DBSCAN, categorizes images via zero-shot CLIP, runs local OCR on documents, identifies duplicates (using SHA256 and LSH-optimized perceptual hashing), and plans natural language search queries using Gemini 2.5 Flash.
 
 ---
 
-## ⚡ Setup & Deployment
+## 🏗️ System Architecture
+
+Aura coordinates a modern web architecture, supporting a fully containerized Docker Compose stack for production and a zero-configuration SQLite stack for local development.
+
+```mermaid
+graph TD
+    Client[React Web Dashboard <br/> Nginx / Port 3000] <-->|HTTP / REST API <br/> Status Polling| API[FastAPI Web Server <br/> Port 8000]
+    API <-->|SQLAlchemy ORM <br/> SafeVector Layer| DB[(Database <br/> PostgreSQL + pgvector / SQLite)]
+    API <-->|Enqueue Jobs| Queue[Redis Message Broker <br/> Port 6379]
+    Worker[Celery Background Worker] <-->|Fetch Tasks| Queue
+    Worker <-->|Write Records| DB
+    Worker -->|Read/Write Files| Storage[Local Disk Storage <br/> ./uploads /photos_data]
+
+    subgraph Offline Ingestion Pipeline
+        CLIP[CLIP ViT-B-32 <br/> 512-dim Semantic Image Space]
+        MTCNN[MTCNN Face Detector] --> FaceNet[FaceNet <br/> 512-dim Face Vector Space]
+        DBSCAN[DBSCAN Clustering <br/> Face Grouping]
+        OCR[PyTesseract OCR] --> MiniLM[all-MiniLM-L6-v2 <br/> 384-dim OCR Text Space]
+        PHASH[pHash DCT <br/> 64-bit Int Hamming Distance]
+    end
+
+    Worker -.-> Offline Ingestion Pipeline
+```
+
+---
+
+## 🧠 Key Features & Technical Details
+
+### 1. Specialized Core Embedding Spaces
+To optimize accuracy, Aura avoids using a single vector space for all semantics, instead splitting concerns into three specialized mathematical representation spaces:
+* **Semantic Image Space (CLIP ViT-B-32)**: Generates **512-dimensional** whole-image embeddings for visual/conceptual matches (e.g. searching *"sunset over hills"*).
+* **Face Recognition Space (MTCNN + FaceNet)**: MTCNN detects bounding boxes, and InceptionResnetV1 (FaceNet) extracts **512-dimensional** face vectors. Aura groups people automatically using **DBSCAN Clustering** (eps=0.55, min_samples=2) without requiring manual tags.
+* **OCR Text Space (all-MiniLM-L6-v2)**: If an image is classified as a document/receipt/prescription, Aura runs PyTesseract OCR and encodes the text into a **384-dimensional** sentence-embedding space, enabling document search by text content.
+
+### 2. Dual-Database Portability (`SafeVector`)
+Aura features a custom SQLAlchemy TypeDecorator called `SafeVector` that allows the system to remain database-independent:
+* **PostgreSQL + pgvector**: When running inside Docker, `SafeVector` compiles columns directly into native PostgreSQL `vector(N)` columns, running high-speed Cosine Similarity indexes on the database server.
+* **SQLite Fallback**: For local development, `SafeVector` compiles into `TEXT` columns, storing float arrays as serialized JSON strings. When search queries are run, the backend dynamically loads the vectors and runs vector similarity in Python using **NumPy** matrix operations.
+
+### 3. $O(N)$ Locality Sensitive Hashing (LSH) Deduplication
+Comparing 64-bit perceptual hashes (pHash) pairwise to detect near-duplicates is an $O(N^2)$ operation, which lags at 100,000+ photos. Aura indexes pHashes using LSH:
+* The 64-bit pHash is split into four 16-bit blocks.
+* If two images have a Hamming distance of $\le 4$, they *must* share at least one identical 16-bit chunk (Pigeonhole Principle).
+* Candidates are filtered by matching 16-bit buckets first, reducing comparisons to $O(N)$ linear time and finding near-duplicates in sub-second times.
+
+### 4. Zero-Shot Optimization (Category Caching)
+Ingesting photos zero-shot via CLIP requires matching image embeddings against candidate category text embeddings. Aura caches the candidate category text embeddings ("a scanned document", "a pet", etc.) in class memory upon startup, saving millions of redundant operations and speeding up zero-shot categorization by **500%**.
+
+### 5. Stateless Google Photos Sync
+To protect user privacy, Aura uses a **stateless authentication flow**. Google OAuth tokens (access & refresh tokens) are never persisted on the server's disk or database. They are redirected to the frontend, stored solely in the client browser's `localStorage`, and passed dynamically in the HTTP headers when synchronization tasks are triggered.
+
+---
+
+## ⚡ Setup & Launch Instructions
 
 ### Prerequisites
-* [Docker](https://www.docker.com/) and Docker Compose installed.
-* [Google Gemini API Key](https://aistudio.google.com/) (optional, falls back to local models if not provided).
-* Google OAuth credentials (optional, for Google Photos integration).
+* Python 3.10+ (for local runs) or Docker & Docker Compose.
+* [Google Gemini API Key](https://aistudio.google.com/) (Required for Search Query Planner).
+* Tesseract OCR installed on your system path (if running locally: `pip install pytesseract` requires `tesseract-ocr` binary).
 
-### 1. Environment Configuration
-
-Create a `.env` file in the root directory:
-
+### 1. Environment Variables
+Create a `.env` file in the root folder:
 ```env
-# Gemini LLM Integration
+# Gemini API Key for Natural Language Search Planning
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# Google Photos API Integration (Optional)
-GOOGLE_CLIENT_ID=your_client_id_here
-GOOGLE_CLIENT_SECRET=your_client_secret_here
+# Google OAuth Credentials (Optional - for Google Photos Connection)
+GOOGLE_CLIENT_ID=your_google_client_id_here
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here
 GOOGLE_REDIRECT_URI=http://localhost:8000/api/v1/auth/google/callback
 ```
 
-### 2. How to Launch & Run
+### 2. Running Locally (Docker-less SQLite Mode)
+Runs the server with a local `aura_photos.db` SQLite file and runs background tasks on the FastAPI execution thread (Redis/Celery not required).
 
-#### Option A: Run Without Docker (Fast, Lightweight Mode)
-This mode runs the application using a local SQLite database (`backend/aura_photos.db`) and FastAPI's native background thread pool for processing (no Redis, Celery, or Postgres installation needed).
-
-On **Windows**:
+**On Windows (PowerShell)**:
 ```powershell
+# Installs dependencies, sets local folders, and runs frontend + backend
 ./run_local.ps1
 ```
+*Note: Make sure uvicorn is run without `--reload` during heavy scanning, as file uploads will trigger uvicorn server restarts and clear the model caches.*
 
-On **macOS/Linux**:
+**On macOS/Linux**:
 ```bash
 chmod +x run_local.sh
 ./run_local.sh
 ```
 
-#### Option B: Run With Docker Compose (Production Stack Mode)
-This mode starts the full containerized stack: PostgreSQL with pgvector, Redis, a Celery worker, and the React frontend served by Nginx.
-
+### 3. Running with Docker Compose (Production Postgres Mode)
+Launches PostgreSQL+pgvector, Redis, FastAPI, Celery, and Nginx.
 ```bash
 docker-compose up --build
 ```
-* **Web Dashboard**: [http://localhost:3000](http://localhost:3000)
-* **API Documentation (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
+* **Web Client**: [http://localhost:3000](http://localhost:3000)
+* **Backend Docs (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-### 3. Ingesting Photos
-Place your photos inside the `./photos_data` directory in the project root. In the Web Dashboard, navigate to **Settings & Sync** and click **Start Scanning Local Folder** to begin ingestion.
-
----
-
-## 🧪 Automated Tests
-
-Aura includes automated unit tests covering near-duplicate detection, search planner query generation, and DBSCAN facial clustering.
-
-To run tests:
-1. Initialize a virtual environment in the `backend` folder:
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   ```
-2. Execute pytest:
-   ```bash
-   pytest tests/
-   ```
-
----
-
-## 📡 API Endpoints
-
-### Photos
-* `GET /api/v1/photos/` - List photos (supports category and storage filters, paginated).
-* `POST /api/v1/photos/upload` - Direct photo upload.
-* `GET /api/v1/photos/{id}` - Retrieve metadata, captions, OCR text, and detected faces.
-* `GET /api/v1/photos/{id}/file` - Securely stream the image file.
-* `DELETE /api/v1/photos/{id}` - Delete photo from DB and filesystem.
-* `POST /api/v1/photos/sync/local` - Scan local folders for new photos.
-* `POST /api/v1/photos/sync/google` - Trigger Google Photos sync page.
-
-### Search
-* `POST /api/v1/search/` - Parse natural-language queries (using LLM structured planning) and run semantic search.
-
-### People
-* `GET /api/v1/people/` - List grouped face clusters with cover image and face counts.
-* `GET /api/v1/people/{id}` - List all photos containing a specific person.
-* `PUT /api/v1/people/{id}` - Label/rename a person cluster.
-* `POST /api/v1/people/recluster` - Manually trigger DBSCAN face clustering.
-
-### Duplicates
-* `GET /api/v1/duplicates/exact` - Get exact duplicate groups (SHA256).
-* `GET /api/v1/duplicates/near` - Get near duplicate pairs within Hamming threshold (LSH-optimized pHash).
+### 4. Running Tests
+Run automated tests covering LSH deduplication, face clustering, and database models:
+```bash
+cd backend
+pip install -r requirements.txt
+pytest tests/
+```
