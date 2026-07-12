@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: photos_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: photos_organiser
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d photos_organiser"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: photos_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: photos_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/photos_organiser
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/auth/google/callback}
+      - UPLOAD_DIR=/app/uploads
+      - LOCAL_SCAN_DIR=/photos_data
+      - USE_CELERY=True
+    volumes:
+      - ./backend:/app
+      - ./photos_data:/photos_data
+      - model_cache:/root/.cache
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: photos_worker
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/photos_organiser
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - UPLOAD_DIR=/app/uploads
+      - LOCAL_SCAN_DIR=/photos_data
+      - USE_CELERY=True
+    volumes:
+      - ./backend:/app
+      - ./photos_data:/photos_data
+      - model_cache:/root/.cache
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A tasks.celery_app worker --loglevel=info --concurrency=1
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: photos_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:8000/api/v1
+    depends_on:
+      - web
+
+volumes:
+  postgres_data:
+  redis_data:
+  model_cache:
